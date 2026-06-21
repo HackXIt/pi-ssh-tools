@@ -250,11 +250,6 @@ function enableSshTools(pi: ExtensionAPI) {
 	pi.setActiveTools(Array.from(next));
 }
 
-function disableSshTools(pi: ExtensionAPI) {
-	const next = pi.getActiveTools().filter((name) => !SSH_TOOL_NAMES.includes(name as (typeof SSH_TOOL_NAMES)[number]));
-	pi.setActiveTools(next);
-}
-
 export default function sshToolsExtension(pi: ExtensionAPI) {
 	let activeTarget: ActiveSshTarget | null = null;
 
@@ -265,7 +260,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 
 	const requireActiveTarget = (): ActiveSshTarget => {
 		if (!activeTarget) {
-			throw new Error("SSH mode is off. Use /ssh <host> first.");
+			throw new Error("SSH mode is off. Call ssh_activate with a target first.");
 		}
 		return activeTarget;
 	};
@@ -296,7 +291,6 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 
 	const deactivate = (ctx: ExtensionContext | ExtensionCommandContext, notify = true) => {
 		activeTarget = null;
-		disableSshTools(pi);
 		updateStatus(ctx);
 		if (notify && ctx.hasUI) {
 			ctx.ui.notify("SSH mode off", "info");
@@ -367,7 +361,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "ssh_deactivate",
 		label: "ssh_deactivate",
-		description: "Deactivate SSH mode and disable the remote SSH tools.",
+		description: "Deactivate SSH mode. Remote SSH tools remain available and will fail clearly until ssh_activate is called again.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const wasActive = activeTarget !== null;
@@ -536,7 +530,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		activeTarget = null;
-		disableSshTools(pi);
+		enableSshTools(pi);
 		updateStatus(ctx);
 	});
 
