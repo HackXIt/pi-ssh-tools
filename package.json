@@ -1,7 +1,7 @@
 {
-  "name": "@ogulcancelik/pi-ssh-tools",
-  "version": "0.1.4",
-  "description": "Explicit SSH tools for pi. Toggle /ssh on for a host, then use ssh_read, ssh_write, ssh_edit, and ssh_bash without replacing local tools.",
+  "name": "@hackxit/pi-ssh-tools",
+  "version": "0.1.5-hackxit.0",
+  "description": "HackXIt standalone derivative of pi-ssh-tools with agent-callable SSH activation.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -13,17 +13,16 @@
     "vps",
     "coding-agent"
   ],
-  "author": "Can Celik",
+  "author": "Can Celik; HackXIt derivative maintainers",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
-    "directory": "packages/pi-ssh-tools"
+    "url": "git+https://github.com/HackXIt/pi-ssh-tools.git"
   },
   "bugs": {
-    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+    "url": "https://github.com/HackXIt/pi-ssh-tools/issues"
   },
-  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-ssh-tools#readme",
+  "homepage": "https://github.com/HackXIt/pi-ssh-tools#readme",
   "engines": {
     "node": ">=18.0.0"
   },
@@ -35,6 +34,12 @@
   "files": [
     "index.ts",
     "README.md",
-    "LICENSE"
-  ]
+    "LICENSE",
+    "FORK.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
 }

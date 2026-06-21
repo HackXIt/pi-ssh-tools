@@ -1,31 +1,37 @@
 # pi-ssh-tools
 
-Explicit SSH tools for [pi](https://github.com/earendil-works/pi).
+HackXIt standalone derivative of `@ogulcancelik/pi-ssh-tools` for [pi](https://github.com/earendil-works/pi).
 
 Turn SSH mode on only when you need it, keep local tools untouched, and give the agent a separate remote toolset:
 
+- `ssh_activate`
+- `ssh_status`
+- `ssh_deactivate`
 - `ssh_read`
 - `ssh_write`
 - `ssh_edit`
 - `ssh_bash`
 
+## Attribution
+
+This repository is a standalone derivative/extraction of `packages/pi-ssh-tools` from Can Celik / `ogulcancelik`'s monorepo:
+
+- Source monorepo: <https://github.com/ogulcancelik/pi-extensions>
+- Source package path: `packages/pi-ssh-tools`
+- Baseline commit: `a9cafebd46f049a67bc45208b76015c464dbb912`
+- Baseline npm package: `@ogulcancelik/pi-ssh-tools@0.1.5`
+
+The original MIT license is preserved in `LICENSE`. See `FORK.md` for derivative details.
+
 ## Install
 
 ```bash
-pi install npm:@ogulcancelik/pi-ssh-tools
-```
-
-Or add manually to `~/.pi/agent/settings.json`:
-
-```json
-{
-  "packages": ["npm:@ogulcancelik/pi-ssh-tools"]
-}
+pi install git:github.com/HackXIt/pi-ssh-tools
 ```
 
 ## What it does
 
-This package adds a `/ssh` command.
+This package adds `/ssh` for manual use and agent-callable tools for API/non-interactive activation.
 
 - Default is off
 - No persistence across sessions
@@ -35,7 +41,32 @@ This package adds a `/ssh` command.
 
 That makes remote work explicit instead of silently swapping out local tools.
 
-## Usage
+## Agent-callable activation
+
+Use `ssh_activate` before remote work:
+
+```json
+{ "target": "mac:/Users/me/project" }
+```
+
+The `target` syntax matches `/ssh <host>[:path]`:
+
+```text
+host
+user@host
+host:/remote/path
+user@host:/remote/path
+```
+
+Then call:
+
+- `ssh_status` to inspect active state
+- `ssh_deactivate` to turn SSH mode off
+- `ssh_read`, `ssh_write`, `ssh_edit`, and `ssh_bash` for remote work
+
+If `ssh_activate` is called without a target in an interactive UI, it may show the existing SSH host picker. In non-interactive contexts it fails clearly and requires an explicit target.
+
+## Manual usage
 
 ```text
 /ssh
@@ -79,6 +110,7 @@ This is mainly a convenience layer. SSH config is not required for the actual re
 - `ssh_write` writes file content over stdin, which behaves better on macOS than GNU-specific `base64 -d` shell snippets
 - relative remote paths resolve against the active remote cwd
 - image reads are supported for common extensions: jpg, jpeg, png, gif, webp
+- `ssh_bash` renders the target and the exact command in the TUI; command text is bash-highlighted while output rendering remains inherited from Pi's built-in bash renderer
 
 ## License
 

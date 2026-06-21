@@ -14,7 +14,9 @@ import {
 	type ExtensionContext,
 	type ReadOperations,
 	type WriteOperations,
+	highlightCode,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 
 type SshProfile = {
@@ -270,7 +272,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 
 	const refreshProfiles = () => parseSshConfigProfiles();
 
-	const updateStatus = (ctx: ExtensionContext) => {
+	const updateStatus = (ctx: ExtensionContext | ExtensionCommandContext) => {
 		if (!activeTarget) {
 			ctx.ui.setStatus(SSH_STATUS_KEY, undefined);
 			return;
@@ -281,20 +283,104 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		);
 	};
 
-	const activate = async (profile: SshProfile, ctx: ExtensionCommandContext) => {
+	const activate = async (profile: SshProfile, ctx: ExtensionContext | ExtensionCommandContext, notify = true) => {
 		const remoteCwd = await resolveRemoteCwd(profile);
 		activeTarget = { name: profile.name, remote: profile.remote, remoteCwd };
 		enableSshTools(pi);
 		updateStatus(ctx);
-		ctx.ui.notify(`SSH mode on: ${activeTarget.name} (${activeTarget.remoteCwd})`, "info");
+		if (notify && ctx.hasUI) {
+			ctx.ui.notify(`SSH mode on: ${activeTarget.name} (${activeTarget.remoteCwd})`, "info");
+		}
+		return activeTarget;
 	};
 
-	const deactivate = (ctx: ExtensionCommandContext) => {
+	const deactivate = (ctx: ExtensionContext | ExtensionCommandContext, notify = true) => {
 		activeTarget = null;
 		disableSshTools(pi);
 		updateStatus(ctx);
-		ctx.ui.notify("SSH mode off", "info");
+		if (notify && ctx.hasUI) {
+			ctx.ui.notify("SSH mode off", "info");
+		}
 	};
+
+	const statusDetails = () => ({
+		active: activeTarget !== null,
+		target: activeTarget?.name,
+		remote: activeTarget?.remote,
+		cwd: activeTarget?.remoteCwd,
+	});
+
+
+	pi.registerTool({
+		name: "ssh_activate",
+		label: "ssh_activate",
+		description: "Activate SSH mode for a target using the same syntax as /ssh <host>[:path].",
+		promptSnippet: "Activate the remote SSH toolset for a target host",
+		promptGuidelines: ["Call ssh_activate with an explicit target before using ssh_read, ssh_write, ssh_edit, or ssh_bash."],
+		parameters: Type.Object({
+			target: Type.Optional(Type.String({ description: "SSH target using /ssh syntax, for example host or user@host:/path" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const profiles = refreshProfiles();
+			let target = typeof params.target === "string" ? params.target.trim() : "";
+
+			if (!target) {
+				if (!ctx.hasUI || profiles.length === 0) {
+					throw new Error('ssh_activate requires an explicit target in non-interactive contexts. Use ssh_activate({ target: "host[:path]" }).');
+				}
+				const picked = await ctx.ui.select("SSH target", profiles.map((profile) => profile.name));
+				if (!picked) {
+					throw new Error("SSH activation cancelled");
+				}
+				target = picked;
+			}
+
+			const activated = await activate(normalizeTargetArg(target, profiles), ctx);
+			return {
+				content: [{ type: "text", text: `SSH mode on: ${activated.name} (${activated.remote}:${activated.remoteCwd})` }],
+				details: statusDetails(),
+			};
+		},
+		renderCall(args, theme) {
+			const target = typeof args?.target === "string" && args.target.trim() ? args.target : "picker";
+			return new Text(`${theme.fg("toolTitle", theme.bold("ssh_activate"))} ${theme.fg("accent", target)}`, 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "ssh_status",
+		label: "ssh_status",
+		description: "Report whether SSH mode is active and which target/cwd is selected.",
+		parameters: Type.Object({}),
+		async execute() {
+			const details = statusDetails();
+			const text = details.active
+				? `SSH mode active: ${details.target} (${details.remote}:${details.cwd})`
+				: "SSH mode is off";
+			return { content: [{ type: "text", text }], details };
+		},
+		renderCall(_args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("ssh_status")), 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "ssh_deactivate",
+		label: "ssh_deactivate",
+		description: "Deactivate SSH mode and disable the remote SSH tools.",
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+			const wasActive = activeTarget !== null;
+			deactivate(ctx);
+			return {
+				content: [{ type: "text", text: wasActive ? "SSH mode off" : "SSH mode was already off" }],
+				details: statusDetails(),
+			};
+		},
+		renderCall(_args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("ssh_deactivate")), 0, 0);
+		},
+	});
 
 	pi.registerTool({
 		name: "ssh_read",
@@ -303,10 +389,10 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		promptSnippet: "Read file contents on the active SSH host",
 		promptGuidelines: ["Use ssh_read when the task is on the active SSH host instead of the local machine."],
 		parameters: readBase.parameters,
-		async execute(toolCallId, params, signal, onUpdate) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
 			const tool = createReadToolDefinition(target.remoteCwd, { operations: createRemoteReadOps(target) });
-			return tool.execute(toolCallId, params, signal, onUpdate);
+			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme) {
 			const path = typeof args?.path === "string" ? args.path : "...";
@@ -327,10 +413,10 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		promptSnippet: "Create or overwrite files on the active SSH host",
 		promptGuidelines: ["Use ssh_write only for new files or full rewrites on the active SSH host."],
 		parameters: writeBase.parameters,
-		async execute(toolCallId, params, signal, onUpdate) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
 			const tool = createWriteToolDefinition(target.remoteCwd, { operations: createRemoteWriteOps(target) });
-			return tool.execute(toolCallId, params, signal, onUpdate);
+			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme) {
 			const path = typeof args?.path === "string" ? args.path : "...";
@@ -355,10 +441,10 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		],
 		parameters: editBase.parameters,
 		prepareArguments: editBase.prepareArguments,
-		async execute(toolCallId, params, signal, onUpdate) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
 			const tool = createEditToolDefinition(target.remoteCwd, { operations: createRemoteEditOps(target) });
-			return tool.execute(toolCallId, params, signal, onUpdate);
+			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme) {
 			const path = typeof args?.path === "string" ? args.path : "...";
@@ -379,17 +465,17 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		promptSnippet: "Execute bash commands on the active SSH host",
 		promptGuidelines: ["Use ssh_bash when the command must run on the active SSH host rather than locally."],
 		parameters: bashBase.parameters,
-		async execute(toolCallId, params, signal, onUpdate) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
 			const tool = createBashToolDefinition(target.remoteCwd, { operations: createRemoteBashOps(target) });
-			return tool.execute(toolCallId, params, signal, onUpdate);
+			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, context) {
 			const command = typeof args?.command === "string" ? args.command : "...";
-			const targetLabel = activeTarget ? activeTarget.name : "inactive";
+			const targetLabel = activeTarget ? `${activeTarget.name} (${activeTarget.remote}:${activeTarget.remoteCwd})` : "inactive";
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			text.setText(
-				`${theme.fg("toolTitle", theme.bold("ssh_bash"))} ${theme.fg("accent", command)} ${theme.fg("muted", `[${targetLabel}]`)}`,
+				`${theme.fg("toolTitle", theme.bold("ssh_bash"))} ${theme.fg("muted", `[${targetLabel}]`)}\n${highlightCode(command, "bash").join("\n")}`,
 			);
 			return text;
 		},
