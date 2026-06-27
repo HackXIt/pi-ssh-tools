@@ -60,7 +60,7 @@ user@host:/remote/path
 
 Then call:
 
-- `ssh_status` to inspect active state
+- `ssh_status` to inspect active state, including the detected remote platform
 - `ssh_deactivate` to turn SSH mode off
 - `ssh_read`, `ssh_write`, `ssh_edit`, and `ssh_bash` for remote work
 
@@ -103,14 +103,18 @@ This is mainly a convenience layer. SSH config is not required for the actual re
 - [pi](https://github.com/earendil-works/pi)
 - local `ssh` client available in `$PATH`
 - key-based auth or another non-interactive SSH setup
-- `bash` available on the remote host
+- POSIX targets: `bash` available on the remote host
+- Windows targets: OpenSSH default command shell is PowerShell Core-compatible
 
 ## Notes
 
-- `ssh_write` writes file content over stdin, which behaves better on macOS than GNU-specific `base64 -d` shell snippets
+- `ssh_activate` probes the remote command shell and records `platform: posix` or `platform: windows-powershell`
+- POSIX targets keep the historical `bash`/`cat`/`test`/`mkdir` backend
+- Windows PowerShell targets use `(Get-Location).Path`, `Test-Path`, .NET file APIs, and PowerShell `Set-Location -LiteralPath` so OpenSSH servers with PowerShell Core default shells work without `exec bash`
+- `ssh_write` writes file content over stdin, which behaves better than GNU-specific `base64 -d` shell snippets and also avoids command-line length limits on Windows
 - relative remote paths resolve against the active remote cwd
 - image reads are supported for common extensions: jpg, jpeg, png, gif, webp
-- `ssh_bash` renders the target and the exact command in the TUI; command text is bash-highlighted while output rendering remains inherited from Pi's built-in bash renderer
+- `ssh_bash` renders the target and the exact command in the TUI; on POSIX targets command text is bash-highlighted, and on Windows targets the command still renders in the same compact shell block while the prompt/system guidance tells agents to use PowerShell syntax
 
 ## License
 

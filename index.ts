@@ -25,10 +25,13 @@ type SshProfile = {
 	cwd?: string;
 };
 
+type RemotePlatform = "posix" | "windows-powershell";
+
 type ActiveSshTarget = {
 	name: string;
 	remote: string;
 	remoteCwd: string;
+	platform: RemotePlatform;
 };
 
 type SshExecOptions = {
@@ -45,6 +48,32 @@ const SSH_CONFIG_PATH = join(homedir(), ".ssh", "config");
 
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function powershellQuote(value: string): string {
+	return `'${value.replaceAll("'", "''")}'`;
+}
+
+function normalizeWindowsPathForRemote(absolutePath: string, remoteCwd: string): string {
+	const withoutSyntheticSlash = absolutePath.replace(/^\/([A-Za-z]:[\\/].*)$/, "$1");
+	if (/^[A-Za-z]:[\\/]/.test(withoutSyntheticSlash) || withoutSyntheticSlash.startsWith("\\\\")) {
+		return withoutSyntheticSlash.replaceAll("\\", "/");
+	}
+	if (withoutSyntheticSlash === "/") {
+		return remoteCwd.replaceAll("\\", "/");
+	}
+	if (withoutSyntheticSlash.startsWith("/")) {
+		const relative = withoutSyntheticSlash.slice(1);
+		const base = remoteCwd.replaceAll("\\", "/").replace(/\/+$/, "");
+		return relative ? `${base}/${relative}` : base;
+	}
+	return withoutSyntheticSlash.replaceAll("\\", "/");
+}
+
+function toRemotePath(target: ActiveSshTarget, absolutePath: string): string {
+	return target.platform === "windows-powershell"
+		? normalizeWindowsPathForRemote(absolutePath, target.remoteCwd)
+		: absolutePath;
 }
 
 function parseSshConfigProfiles(): SshProfile[] {
@@ -189,17 +218,68 @@ async function sshOk(remote: string, command: string, options: SshExecOptions = 
 	return stdout;
 }
 
-async function resolveRemoteCwd(profile: SshProfile): Promise<string> {
+async function detectRemotePlatform(remote: string): Promise<RemotePlatform> {
+	try {
+		const stdout = await sshOk(
+			remote,
+			"if ($PSVersionTable) { Write-Output '__PI_SSH_PLATFORM=windows-powershell__' }",
+			{ timeoutSeconds: 5 },
+		);
+		if (stdout.toString("utf8").includes("__PI_SSH_PLATFORM=windows-powershell__")) {
+			return "windows-powershell";
+		}
+	} catch {
+		// Not PowerShell, or the remote rejected the probe. Try POSIX next.
+	}
+
+	try {
+		const stdout = await sshOk(
+			remote,
+			`printf '__PI_SSH_PLATFORM=posix:%s__\\n' "$(uname -s 2>/dev/null || echo unknown)"`,
+			{ timeoutSeconds: 5 },
+		);
+		if (stdout.toString("utf8").includes("__PI_SSH_PLATFORM=posix:")) {
+			return "posix";
+		}
+	} catch {
+		// Fall through to the historical behavior.
+	}
+
+	return "posix";
+}
+
+async function resolveRemoteCwd(profile: SshProfile, platform: RemotePlatform): Promise<string> {
 	if (profile.cwd?.trim()) {
 		return profile.cwd.trim();
+	}
+	if (platform === "windows-powershell") {
+		return (await sshOk(profile.remote, "(Get-Location).Path")).toString("utf8").trim();
 	}
 	return (await sshOk(profile.remote, "pwd")).toString("utf8").trim();
 }
 
 function createRemoteReadOps(target: ActiveSshTarget): ReadOperations {
 	return {
-		readFile: (absolutePath) => sshOk(target.remote, `cat ${shellQuote(absolutePath)}`),
-		access: (absolutePath) => sshOk(target.remote, `test -r ${shellQuote(absolutePath)}`).then(() => {}),
+		readFile: (absolutePath) => {
+			const remotePath = toRemotePath(target, absolutePath);
+			if (target.platform === "windows-powershell") {
+				return sshOk(
+					target.remote,
+					`$p=${powershellQuote(remotePath)}; $bytes=[System.IO.File]::ReadAllBytes($p); [Console]::OpenStandardOutput().Write($bytes,0,$bytes.Length)`,
+				);
+			}
+			return sshOk(target.remote, `cat ${shellQuote(remotePath)}`);
+		},
+		access: (absolutePath) => {
+			const remotePath = toRemotePath(target, absolutePath);
+			if (target.platform === "windows-powershell") {
+				return sshOk(
+					target.remote,
+					`if (-not (Test-Path -LiteralPath ${powershellQuote(remotePath)} -PathType Leaf)) { exit 1 }`,
+				).then(() => {});
+			}
+			return sshOk(target.remote, `test -r ${shellQuote(remotePath)}`).then(() => {});
+		},
 		detectImageMimeType: async (absolutePath) => inferImageMimeType(absolutePath),
 	};
 }
@@ -207,9 +287,28 @@ function createRemoteReadOps(target: ActiveSshTarget): ReadOperations {
 function createRemoteWriteOps(target: ActiveSshTarget): WriteOperations {
 	return {
 		writeFile: async (absolutePath, content) => {
-			await sshOk(target.remote, `cat > ${shellQuote(absolutePath)}`, { stdin: content });
+			const remotePath = toRemotePath(target, absolutePath);
+			if (target.platform === "windows-powershell") {
+				const base64Content = Buffer.from(content, "utf8").toString("base64");
+				await sshOk(
+					target.remote,
+					`$p=${powershellQuote(remotePath)}; $dir=Split-Path -Parent $p; if ($dir) { [System.IO.Directory]::CreateDirectory($dir) | Out-Null }; $b64=[Console]::In.ReadToEnd(); $bytes=[Convert]::FromBase64String($b64); [System.IO.File]::WriteAllBytes($p,$bytes)`,
+					{ stdin: base64Content },
+				);
+				return;
+			}
+			await sshOk(target.remote, `cat > ${shellQuote(remotePath)}`, { stdin: content });
 		},
-		mkdir: (dir) => sshOk(target.remote, `mkdir -p ${shellQuote(dir)}`).then(() => {}),
+		mkdir: (dir) => {
+			const remoteDir = toRemotePath(target, dir);
+			if (target.platform === "windows-powershell") {
+				return sshOk(
+					target.remote,
+					`[System.IO.Directory]::CreateDirectory(${powershellQuote(remoteDir)}) | Out-Null`,
+				).then(() => {});
+			}
+			return sshOk(target.remote, `mkdir -p ${shellQuote(remoteDir)}`).then(() => {});
+		},
 	};
 }
 
@@ -219,16 +318,36 @@ function createRemoteEditOps(target: ActiveSshTarget): EditOperations {
 	return {
 		readFile: readOps.readFile,
 		writeFile: writeOps.writeFile,
-		access: (absolutePath) =>
-			sshOk(target.remote, `test -r ${shellQuote(absolutePath)} && test -w ${shellQuote(absolutePath)}`).then(
+		access: (absolutePath) => {
+			const remotePath = toRemotePath(target, absolutePath);
+			if (target.platform === "windows-powershell") {
+				return sshOk(
+					target.remote,
+					`if (-not (Test-Path -LiteralPath ${powershellQuote(remotePath)} -PathType Leaf)) { exit 1 }; $item=Get-Item -LiteralPath ${powershellQuote(remotePath)}; if ($item.IsReadOnly) { exit 1 }`,
+				).then(() => {});
+			}
+			return sshOk(target.remote, `test -r ${shellQuote(remotePath)} && test -w ${shellQuote(remotePath)}`).then(
 				() => {},
-			),
+			);
+		},
 	};
 }
 
 function createRemoteBashOps(target: ActiveSshTarget): BashOperations {
 	return {
 		exec: async (command, cwd, { onData, signal, timeout }) => {
+			if (target.platform === "windows-powershell") {
+				const remoteCwd = toRemotePath(target, cwd);
+				const script = `Set-Location -LiteralPath ${powershellQuote(remoteCwd)}\n${command}\nif ($global:LASTEXITCODE -is [int]) { exit $global:LASTEXITCODE } else { exit 0 }\n`;
+				const { exitCode } = await sshExec(target.remote, script, {
+					signal,
+					timeoutSeconds: timeout,
+					onStdoutData: onData,
+					onStderrData: onData,
+				});
+				return { exitCode };
+			}
+
 			const script = `cd ${shellQuote(cwd)}\n${command}\n`;
 			const { exitCode } = await sshExec(target.remote, "exec bash -se", {
 				stdin: script,
@@ -248,6 +367,13 @@ function enableSshTools(pi: ExtensionAPI) {
 		next.add(name);
 	}
 	pi.setActiveTools(Array.from(next));
+}
+
+function toolCwdForTarget(target: ActiveSshTarget): string {
+	// Pi's built-in path resolver uses the local Node platform. On Linux/macOS it
+	// does not recognize Windows drive paths as absolute, so use / as a neutral
+	// synthetic cwd and map /foo back to <remoteCwd>/foo inside operations.
+	return target.platform === "windows-powershell" ? "/" : target.remoteCwd;
 }
 
 export default function sshToolsExtension(pi: ExtensionAPI) {
@@ -279,12 +405,13 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 	};
 
 	const activate = async (profile: SshProfile, ctx: ExtensionContext | ExtensionCommandContext, notify = true) => {
-		const remoteCwd = await resolveRemoteCwd(profile);
-		activeTarget = { name: profile.name, remote: profile.remote, remoteCwd };
+		const platform = await detectRemotePlatform(profile.remote);
+		const remoteCwd = await resolveRemoteCwd(profile, platform);
+		activeTarget = { name: profile.name, remote: profile.remote, remoteCwd, platform };
 		enableSshTools(pi);
 		updateStatus(ctx);
 		if (notify && ctx.hasUI) {
-			ctx.ui.notify(`SSH mode on: ${activeTarget.name} (${activeTarget.remoteCwd})`, "info");
+			ctx.ui.notify(`SSH mode on: ${activeTarget.name} (${activeTarget.remoteCwd}, ${activeTarget.platform})`, "info");
 		}
 		return activeTarget;
 	};
@@ -302,6 +429,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		target: activeTarget?.name,
 		remote: activeTarget?.remote,
 		cwd: activeTarget?.remoteCwd,
+		platform: activeTarget?.platform,
 	});
 
 
@@ -331,7 +459,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 
 			const activated = await activate(normalizeTargetArg(target, profiles), ctx);
 			return {
-				content: [{ type: "text", text: `SSH mode on: ${activated.name} (${activated.remote}:${activated.remoteCwd})` }],
+				content: [{ type: "text", text: `SSH mode on: ${activated.name} (${activated.remote}:${activated.remoteCwd}, ${activated.platform})` }],
 				details: statusDetails(),
 			};
 		},
@@ -349,7 +477,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		async execute() {
 			const details = statusDetails();
 			const text = details.active
-				? `SSH mode active: ${details.target} (${details.remote}:${details.cwd})`
+				? `SSH mode active: ${details.target} (${details.remote}:${details.cwd}, ${details.platform})`
 				: "SSH mode is off";
 			return { content: [{ type: "text", text }], details };
 		},
@@ -385,7 +513,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		parameters: readBase.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
-			const tool = createReadToolDefinition(target.remoteCwd, { operations: createRemoteReadOps(target) });
+			const tool = createReadToolDefinition(toolCwdForTarget(target), { operations: createRemoteReadOps(target) });
 			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme) {
@@ -409,7 +537,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		parameters: writeBase.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
-			const tool = createWriteToolDefinition(target.remoteCwd, { operations: createRemoteWriteOps(target) });
+			const tool = createWriteToolDefinition(toolCwdForTarget(target), { operations: createRemoteWriteOps(target) });
 			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme) {
@@ -437,7 +565,7 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		prepareArguments: editBase.prepareArguments,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
-			const tool = createEditToolDefinition(target.remoteCwd, { operations: createRemoteEditOps(target) });
+			const tool = createEditToolDefinition(toolCwdForTarget(target), { operations: createRemoteEditOps(target) });
 			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme) {
@@ -455,9 +583,9 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "ssh_bash",
 		label: "ssh_bash",
-		description: "Execute a bash command on the active SSH host in the active remote working directory.",
-		promptSnippet: "Execute bash commands on the active SSH host",
-		promptGuidelines: ["Use ssh_bash when the command must run on the active SSH host rather than locally."],
+		description: "Execute a shell command on the active SSH host in the active remote working directory. POSIX targets use bash; Windows PowerShell targets use PowerShell Core syntax.",
+		promptSnippet: "Execute shell commands on the active SSH host",
+		promptGuidelines: ["Use ssh_bash when the command must run on the active SSH host rather than locally. Use PowerShell syntax when ssh_status reports platform windows-powershell."],
 		parameters: bashBase.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const target = requireActiveTarget();
@@ -538,10 +666,13 @@ export default function sshToolsExtension(pi: ExtensionAPI) {
 		if (!activeTarget) {
 			return;
 		}
+		const shellGuidance = activeTarget.platform === "windows-powershell"
+			? "ssh_bash runs in PowerShell Core on this target; use PowerShell syntax unless explicitly invoking cmd.exe or another shell."
+			: "ssh_bash runs through bash on this target."
 		return {
 			systemPrompt:
 				event.systemPrompt +
-				`\n\nSSH mode is active for this turn.\nRemote host: ${activeTarget.remote}\nRemote working directory: ${activeTarget.remoteCwd}\nUse ssh_read, ssh_write, ssh_edit, and ssh_bash for remote work. Local read/write/edit/bash still operate on the local machine.`,
+				`\n\nSSH mode is active for this turn.\nRemote host: ${activeTarget.remote}\nRemote platform: ${activeTarget.platform}\nRemote working directory: ${activeTarget.remoteCwd}\n${shellGuidance}\nUse ssh_read, ssh_write, ssh_edit, and ssh_bash for remote work. Local read/write/edit/bash still operate on the local machine.`,
 		};
 	});
 }

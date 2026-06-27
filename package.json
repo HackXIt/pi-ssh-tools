@@ -1,6 +1,6 @@
 {
   "name": "@hackxit/pi-ssh-tools",
-  "version": "0.1.5-hackxit.0",
+  "version": "0.1.5-hackxit.1",
   "description": "HackXIt standalone derivative of pi-ssh-tools with agent-callable SSH activation.",
   "type": "module",
   "keywords": [
